@@ -1,4 +1,5 @@
 use egui::*;
+use egui_alignments::Alignable;
 
 pub fn circular_button(ui: &mut Ui, diameter: f32, text: impl Into<WidgetText>) -> Response {
     let radius = diameter / 2.0;
@@ -36,12 +37,19 @@ pub fn circular_button(ui: &mut Ui, diameter: f32, text: impl Into<WidgetText>) 
     response
 }
 
-pub fn sidebar_entry<T: PartialEq>(ui: &mut Ui, current_value: &mut T, set_value: T, text: &str) {
-    let w = ui.available_width();
-    let h = 40.0;
-
+pub fn sidebar_entry<T: PartialEq>(ui: &mut Ui, current_value: &mut T, set_value: T, text: impl Into<String>) {
     let is_selected = *current_value == set_value;
-    if ui.add_sized([w, h], Button::selectable(is_selected, RichText::new(text).size(20.0))).clicked() {
+    if sized_entry_centered(ui, 40.0, is_selected, text).clicked() {
         *current_value = set_value;
     }
+}
+
+pub fn sized_entry_centered(ui: &mut Ui, h: f32, is_selected: bool, text: impl Into<String>) -> Response {
+    sized_entry(ui, h, Align2::CENTER_TOP, is_selected, text)
+}
+
+pub fn sized_entry(ui: &mut Ui, h: f32, align: Align2, is_selected: bool, text: impl Into<String>) -> Response {
+    let w = ui.available_width();
+
+    Button::selectable(is_selected, RichText::new(text).size(20.0)).min_size(Vec2::new(w, h)).align(ui, align)
 }
