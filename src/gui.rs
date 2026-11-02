@@ -1,6 +1,6 @@
 use egui::*;
 use egui_alignments::*;
-use crate::stuff::{load_songs, Song};
+use crate::song::{load_songs, Song};
 use crate::widgets::*;
 
 #[derive(PartialEq)]
@@ -17,6 +17,7 @@ pub struct App {
 
     // AppScreen variables (it just works better if App is gonna hold all this)
     selected_idx: Option<usize>,
+    cover_image: Option<TextureHandle>,
 }
 
 impl App {
@@ -53,23 +54,14 @@ impl App {
 
         center_horizontal(ui, |ui| {
             if circular_button(ui, 50.0, RichText::new("<").size(35.0)).clicked() {
-                if let Some(idx) = self.selected_idx {
-                    // Edge case bc (idx - 1) might underflow and panic
-                    if idx == 0 {
-                        self.selected_idx = Some(self.songs.len() - 1);
-                    } else {
-                        self.selected_idx = Some(idx - 1);
-                    }
-                }
+                self.change_track(ui, -1);
             }
             if circular_button(ui, 50.0, RichText::new("II").size(35.0)).clicked() {
-                self.selected_idx = None;
+                self.set_track(ui, None);
             }
             if circular_button(ui, 50.0, RichText::new(">").size(35.0)).clicked() {
                 // Here modulo just works
-                if let Some(idx) = self.selected_idx {
-                    self.selected_idx = Some((idx + 1) % self.songs.len());
-                }
+                self.change_track(ui, 1);
             }
         });
 
@@ -99,24 +91,95 @@ impl App {
 
     // Central Panel modes
     fn draw_central_current(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        ui.heading("Currently playing");
-        ui.label("Value");
-        ui.label(self.value.to_string());
-        ui.label("Example");
-        ui.label("Example values");
+        if let Some(texture_handle) = &self.cover_image && let Some(idx) = self.selected_idx {
+            let song = &self.songs[idx];
+            let available_size = ui.available_size() / 1.5; // Returns an egui::Vec2 (width, height)
+
+            // 2. Get the texture size as floats and its aspect ratio
+            let texture_size = texture_handle.size_vec2();
+            let aspect_ratio = texture_handle.aspect_ratio();
+
+            // 3. Prevent division by zero if the texture hasn't loaded properly
+            let (w_0, h_0) = if texture_size.y > 0.0 && texture_size.x > 0.0 {
+                // Check if scaling by height makes the width too wide
+                if aspect_ratio * available_size.y <= available_size.x {
+                    // Height is the limiting factor
+                    (aspect_ratio * available_size.y, available_size.y)
+                } else {
+                    // Width is the limiting factor
+                    (available_size.x, available_size.x / aspect_ratio)
+                }
+            } else {
+                (0.0, 0.0)
+            };
+
+            center_vertical(ui, |ui| {
+                ui.add(Image::new(texture_handle).max_size(vec2(w_0, h_0)));
+                ui.add(Label::new(RichText::new(song.display()).size(20.0)))
+            });
+        }
     }
 
     fn draw_cental_songs(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let mut new_ind = None;
         ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
                 for (ind, song) in self.songs.iter().enumerate() {
                     let resp = sized_entry(ui, 40.0, Align2::LEFT_TOP, self.selected_idx == Some(ind), &song.derived_name);
                     if resp.clicked() {
-                        self.selected_idx = Some(ind);
+                        new_ind = Some(ind);  // Just to make borrow checker shut the fuck up
+                    }
+                    if resp.double_clicked() {
+                        println!("{:?}", self.songs[self.selected_idx.unwrap()]);
+                        self.screen = AppScreen::Current;
                     }
                 }
             });
+        if let Some(ind) = new_ind {
+            self.set_track(ui, Some(ind));
+        }
+    }
+
+    fn set_track(&mut self, ui: &mut Ui, idx: Option<usize>) {
+        self.selected_idx = idx;
+        if idx.is_none() {
+            self.cover_image = None;
+            return;
+        }
+        let idx = self.selected_idx.unwrap();
+        let song = &self.songs[idx];
+        let img = if let Some(art) = &song.album_art {
+            image::load_from_memory(art).unwrap()
+        } else {
+            image::load_from_memory(include_bytes!("../assets/missing-draft.png")).unwrap()
+        };
+
+        let rgba = img.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+
+        let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice());
+        let texture_handle = ui.load_texture(
+            "cover_art",
+            color_image,
+            TextureOptions::default()
+        );
+        self.cover_image = Some(texture_handle);
+    }
+
+    fn change_track(&mut self, ui: &mut Ui, offset: i32) {
+        // Calculate next index
+        let mut idx = match self.selected_idx {
+            Some(idx) => idx,
+            None => return,  // Moving None doesn't do shit, so we don't care in the slightest
+        };
+        if offset < 0 && idx as i32 + offset < 0 {
+            idx = (self.songs.len() as i32 + idx as i32 + offset) as usize;
+        } else {
+            idx = (idx as i32 + offset) as usize % self.songs.len();
+        }
+
+        self.set_track(ui, Some(idx));
     }
 }
 
@@ -126,8 +189,13 @@ impl Default for App {
             value: 0.0,
             volume: 0.0,
             screen: AppScreen::Current,
-            songs: load_songs("songs", false).unwrap(),
+            songs: load_songs(if option_env!("FULL_SONG_LIST") == Some("1") {
+                "/home/tumpa/projects/sandbox/music_downloads/"
+            } else {
+                "songs"
+            }, false).unwrap(),
             selected_idx: None,
+            cover_image: None
         }
     }
 }
