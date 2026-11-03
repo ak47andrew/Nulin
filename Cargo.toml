@@ -12,3 +12,6 @@ id3 = "1.17.2"
 derivative = "2.2.0"
 chrono = "0.4.45"
 image = "0.25.10"
+rodio = "0.23.0"
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+rand = "0.10.3"

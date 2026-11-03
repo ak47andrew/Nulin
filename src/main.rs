@@ -1,6 +1,8 @@
 pub mod gui;
 pub mod widgets;
 pub mod song;
+pub mod playback;
+pub mod media_controls;
 
 use std::time::Instant;
 use crate::gui::App;

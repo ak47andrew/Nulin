@@ -1,9 +1,16 @@
+use std::process::exit;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use egui::*;
 use egui_alignments::*;
+use rand::random_range;
+use souvlaki::{MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition, SeekDirection};
+use crate::media_controls::{start_souvlaki_thread, MediaController};
+use crate::playback::{spawn_player, PlayerHandle, Command, Event};
 use crate::song::{load_songs, Song};
 use crate::widgets::*;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 pub enum AppScreen {
     Current,
     Songs
@@ -11,13 +18,14 @@ pub enum AppScreen {
 
 pub struct App {
     screen: AppScreen,
-    value: f32,
-    volume: f32,
     songs: Vec<Song>,
-
-    // AppScreen variables (it just works better if App is gonna hold all this)
+    player_handle: PlayerHandle,
+    media_controls: Option<MediaController>,
     selected_idx: Option<usize>,
+    playing_idx: Option<usize>,
     cover_image: Option<TextureHandle>,
+    shuffle: bool,
+    loop_: bool
 }
 
 impl App {
@@ -45,23 +53,32 @@ impl App {
     }
 
     fn draw_player(&mut self, ui: &mut Ui) {
-        ui.scope(|ui| {
+        let mut p = self.player_handle.shared.position_ms.load(Ordering::Relaxed);
+        if ui.scope(|ui| {
             ui.style_mut().spacing.slider_width = ui.available_width();
-            ui.add(Slider::new(&mut self.value, 0.0..=1.0).show_value(false).trailing_fill(true));
-        });
+            ui.add(Slider::new(&mut p, 0..=self.player_handle.shared.duration_ms.load(Ordering::Relaxed)).show_value(false).trailing_fill(true))
+        }).inner.drag_stopped() {
+            self.seek(p);
+        }
 
         let row_rect = ui.available_rect_before_wrap();
 
         center_horizontal(ui, |ui| {
+            if circular_button(ui, 50.0, RichText::new("🔀").size(35.0).color(if self.shuffle {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
+                // self.prev_song(ui);
+                self.shuffle = !self.shuffle;
+            }
             if circular_button(ui, 50.0, RichText::new("<").size(35.0)).clicked() {
-                self.change_track(ui, -1);
+                self.prev_song(ui);
             }
             if circular_button(ui, 50.0, RichText::new("II").size(35.0)).clicked() {
-                self.set_track(ui, None);
+                self.toggle_pause();
             }
             if circular_button(ui, 50.0, RichText::new(">").size(35.0)).clicked() {
-                // Here modulo just works
-                self.change_track(ui, 1);
+                self.next_song(ui);
+            }
+            if circular_button(ui, 50.0, RichText::new("🔂").size(35.0).color(if self.loop_ {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
+                self.loop_ = !self.loop_
             }
         });
 
@@ -74,10 +91,13 @@ impl App {
             pos2(row_rect.max.x, row_rect.max.y),
         );
 
-        ui.scope(|ui| {
+        let mut v = self.player_handle.shared.volume.lock().unwrap().clone();
+        if ui.scope(|ui| {
             ui.style_mut().spacing.slider_width = 140.0;
-            ui.put(right_slider_rect, Slider::new(&mut self.volume, 0.0..=100.0).show_value(false).trailing_fill(true));
-        });
+            ui.put(right_slider_rect, Slider::new(&mut v, 0.0..=1.0).show_value(false).trailing_fill(true))
+        }).inner.drag_stopped() {
+            self.set_volume(v);
+        }
     }
 
     fn draw_sidebar(&mut self, ui: &mut Ui) {
@@ -85,13 +105,17 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_sized([ui.available_width(), 20.0], Label::new(RichText::new("Labels").heading()));
         });
+        let prev = self.screen;
         sidebar_entry(ui, &mut self.screen, AppScreen::Current, "Player");
         sidebar_entry(ui, &mut self.screen, AppScreen::Songs, "Songs");
+        if prev != self.screen && self.screen == AppScreen::Songs {
+            self.selected_idx = self.playing_idx;
+        }
     }
 
     // Central Panel modes
     fn draw_central_current(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        if let Some(texture_handle) = &self.cover_image && let Some(idx) = self.selected_idx {
+        if let Some(texture_handle) = &self.cover_image && let Some(idx) = self.playing_idx {
             let song = &self.songs[idx];
             let available_size = ui.available_size() / 1.5; // Returns an egui::Vec2 (width, height)
 
@@ -122,6 +146,7 @@ impl App {
 
     fn draw_cental_songs(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let mut new_ind = None;
+        let mut is_dc = false;
         ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -131,23 +156,29 @@ impl App {
                         new_ind = Some(ind);  // Just to make borrow checker shut the fuck up
                     }
                     if resp.double_clicked() {
-                        println!("{:?}", self.songs[self.selected_idx.unwrap()]);
+
+                        is_dc = true;
                         self.screen = AppScreen::Current;
                     }
                 }
             });
         if let Some(ind) = new_ind {
-            self.set_track(ui, Some(ind));
+            self.selected_idx = Some(ind);
+        }
+        if is_dc {
+            self.playing_idx = new_ind;
+            self.set_track(ui, new_ind);
+            self.play_selected();
         }
     }
 
     fn set_track(&mut self, ui: &mut Ui, idx: Option<usize>) {
-        self.selected_idx = idx;
+        self.playing_idx = idx;
         if idx.is_none() {
             self.cover_image = None;
             return;
         }
-        let idx = self.selected_idx.unwrap();
+        let idx = self.playing_idx.unwrap();
         let song = &self.songs[idx];
         let img = if let Some(art) = &song.album_art {
             image::load_from_memory(art).unwrap()
@@ -169,9 +200,9 @@ impl App {
 
     fn change_track(&mut self, ui: &mut Ui, offset: i32) {
         // Calculate next index
-        let mut idx = match self.selected_idx {
+        let mut idx = match self.playing_idx {
             Some(idx) => idx,
-            None => return,  // Moving None doesn't do shit, so we don't care in the slightest
+            None => return,  // Moving on None doesn't do shit, so we don't care in the slightest
         };
         if offset < 0 && idx as i32 + offset < 0 {
             idx = (self.songs.len() as i32 + idx as i32 + offset) as usize;
@@ -181,13 +212,71 @@ impl App {
 
         self.set_track(ui, Some(idx));
     }
+
+    fn randomize_track(&mut self, ui: &mut Ui) {
+        self.set_track(
+            ui,
+            Some(random_range(0..self.songs.len()))
+        );
+    }
+
+    fn toggle_pause(&self) {
+        if self.player_handle.shared.playing.load(Ordering::Relaxed) {
+            self.pause();
+        } else {
+            self.resume();
+        }
+    }
+
+    pub fn pause(&self) {
+        self.player_handle.tx.send(Command::Pause).unwrap();
+    }
+
+    pub fn resume(&self) {
+        self.player_handle.tx.send(Command::Resume).unwrap();
+    }
+
+    fn play_selected(&mut self) {
+        match self.playing_idx {
+            Some(idx) => {
+                self.player_handle.tx.send(Command::Play(self.songs[idx].path.clone())).unwrap();
+            }
+            None => {
+                self.player_handle.tx.send(Command::Stop).unwrap();
+            }
+        }
+    }
+
+    fn next_song(&mut self, ui: &mut Ui) {
+        if self.shuffle {
+            self.randomize_track(ui);
+        } else {
+            self.change_track(ui, 1);
+        }
+        self.play_selected();
+    }
+
+    fn prev_song(&mut self, ui: &mut Ui) {
+        if self.shuffle {
+            self.randomize_track(ui);
+        } else {
+            self.change_track(ui, -1);
+        }
+        self.play_selected();
+    }
+
+    fn seek(&mut self, seek_point_ms: u64) {
+        self.player_handle.tx.send(Command::Seek(Duration::from_millis(seek_point_ms))).unwrap();
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        self.player_handle.tx.send(Command::SetVolume(volume)).unwrap();
+    }
 }
 
 impl Default for App {
     fn default() -> Self {
-        Self {
-            value: 0.0,
-            volume: 0.0,
+        let s = Self {
             screen: AppScreen::Current,
             songs: load_songs(if option_env!("FULL_SONG_LIST") == Some("1") {
                 "/home/tumpa/projects/sandbox/music_downloads/"
@@ -195,8 +284,19 @@ impl Default for App {
                 "songs"
             }, false).unwrap(),
             selected_idx: None,
-            cover_image: None
+            playing_idx: None,
+            cover_image: None,
+            player_handle: spawn_player(),
+            media_controls: start_souvlaki_thread(),
+            shuffle: false,
+            loop_: false
+        };
+
+        if s.media_controls.is_none() {
+            println!("Failed to initialize media controls");
         }
+
+        s
     }
 }
 
@@ -205,6 +305,104 @@ impl eframe::App for App {
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             ui.send_viewport_cmd(ViewportCommand::Close);
         }
+
+        while let Ok(ev) = self.player_handle.events.recv_timeout(Duration::from_millis(10)) {
+            match ev {
+                Event::Finished => {
+                    if self.loop_ {
+                        self.play_selected();
+                    } else {
+                        self.next_song(ui);
+                    }
+                },
+                Event::SongLoaded => {
+                    if let Some(controls) = &mut self.media_controls {
+                        let song = &self.songs[self.playing_idx.unwrap()];
+                        let s = MediaMetadata {
+                            title: song.title.as_deref(),
+                            album: song.album.as_deref(),
+                            artist: song.artists.as_ref().and_then(|s| s.first().map(|a| a.as_str())),
+                            duration: Some(Duration::from_millis(self.player_handle.shared.duration_ms.load(Ordering::Relaxed))),
+                            cover_url: None
+                        };
+
+                        let _ = controls.media_controls.set_metadata(s);
+                    }
+                }
+            }
+        }
+
+        let mut events = vec![]; // Fighting borrow checker because... yikes
+        if let Some(controls) = &mut self.media_controls {
+            while let Ok(ev) = controls.events.recv_timeout(Duration::from_millis(10)) {
+                events.push(ev);
+            }
+
+            let _ = controls.media_controls.set_volume(*self.player_handle.shared.volume.lock().unwrap() as f64).unwrap();
+
+            let _ = controls.media_controls.set_playback(
+                if !self.player_handle.shared.track_loaded.load(Ordering::Relaxed) {
+                    MediaPlayback::Stopped
+                } else if !self.player_handle.shared.playing.load(Ordering::Relaxed) {
+                    MediaPlayback::Paused {
+                        progress: Some(
+                            MediaPosition(
+                                Duration::from_millis(
+                                    self.player_handle.shared.position_ms.load(Ordering::Relaxed)
+                                )
+                            )
+                        )
+                    }
+                } else {
+                    MediaPlayback::Playing {
+                        progress: Some(
+                            MediaPosition(
+                                Duration::from_millis(
+                                    self.player_handle.shared.position_ms.load(Ordering::Relaxed)
+                                )
+                            )
+                        )
+                    }
+                }
+            ).unwrap();
+        }
+
+        for ev in events {
+            match ev {
+                MediaControlEvent::Play => { self.resume() }
+                MediaControlEvent::Pause => { self.pause() }
+                MediaControlEvent::Toggle => { self.toggle_pause() }
+                MediaControlEvent::Next => { self.next_song(ui) }
+                MediaControlEvent::Previous => { self.prev_song(ui) }
+                MediaControlEvent::Stop => { self.playing_idx = None; self.play_selected() }
+                MediaControlEvent::Seek(_) => { todo!() }  // Sounds like some kind of bs. I'll set as todo and figure it out later if needed
+                MediaControlEvent::SeekBy(sd, d) => {  // Gonna give this thing a d omegalul
+                    match sd {
+                        SeekDirection::Forward => {
+                            let current = self.player_handle.shared.position_ms.load(Ordering::Relaxed);
+                            self.seek(current + d.as_millis() as u64);
+                        }
+                        SeekDirection::Backward => {
+                            let current = self.player_handle.shared.position_ms.load(Ordering::Relaxed);
+                            let offset = (d.as_millis() as u64).min(current);
+                            self.seek(current - offset);
+                        }
+                    }
+                }
+                MediaControlEvent::SetPosition(pos) => {
+                    self.seek(pos.0.as_millis() as u64);
+                }
+                MediaControlEvent::SetVolume(v) => {
+                    self.set_volume(v as f32);
+                }
+                MediaControlEvent::SetShuffle(_) => {}  // Not implemented :D
+                MediaControlEvent::OpenUri(_) => {}  // Not gonna happen
+                MediaControlEvent::Raise => {ui.send_viewport_cmd(ViewportCommand::Focus)}
+                MediaControlEvent::Quit => {exit(0)},  // Uh... you sure this should be an option...? Fine ig...
+                _ => {unreachable!()}
+            }
+        }
+
         self.draw(ui, _frame);
     }
 }
