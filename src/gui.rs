@@ -1,10 +1,11 @@
 use std::process::exit;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use egui::*;
 use egui_alignments::*;
 use rand::random_range;
 use souvlaki::{MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition, SeekDirection};
+use crate::config::Config;
 use crate::media_controls::{start_souvlaki_thread, MediaController};
 use crate::playback::{spawn_player, PlayerHandle, Command, Event};
 use crate::song::{load_songs, Song};
@@ -24,8 +25,9 @@ pub struct App {
     selected_idx: Option<usize>,
     playing_idx: Option<usize>,
     cover_image: Option<TextureHandle>,
-    shuffle: bool,
-    loop_: bool
+    config: Config,
+    is_config_applied: bool,  // We don't have `ui` in Default so we have to apply it on our first frame
+    last_saved: Instant,
 }
 
 impl App {
@@ -64,9 +66,10 @@ impl App {
         let row_rect = ui.available_rect_before_wrap();
 
         center_horizontal(ui, |ui| {
-            if circular_button(ui, 50.0, RichText::new("🔀").size(35.0).color(if self.shuffle {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
+            if circular_button(ui, 50.0, RichText::new("🔀").size(35.0).color(if self.config.shuffle {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
                 // self.prev_song(ui);
-                self.shuffle = !self.shuffle;
+                self.config.shuffle = !self.config.shuffle;
+                self.save_config();
             }
             if circular_button(ui, 50.0, RichText::new("<").size(35.0)).clicked() {
                 self.prev_song(ui);
@@ -77,8 +80,9 @@ impl App {
             if circular_button(ui, 50.0, RichText::new(">").size(35.0)).clicked() {
                 self.next_song(ui);
             }
-            if circular_button(ui, 50.0, RichText::new("🔂").size(35.0).color(if self.loop_ {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
-                self.loop_ = !self.loop_
+            if circular_button(ui, 50.0, RichText::new("🔂").size(35.0).color(if self.config.loop_one {Color32::ORANGE} else {Color32::PLACEHOLDER})).clicked() {
+                self.config.loop_one = !self.config.loop_one;
+                self.save_config();
             }
         });
 
@@ -245,10 +249,11 @@ impl App {
                 self.player_handle.tx.send(Command::Stop).unwrap();
             }
         }
+        self.save_config();
     }
 
     fn next_song(&mut self, ui: &mut Ui) {
-        if self.shuffle {
+        if self.config.shuffle {
             self.randomize_track(ui);
         } else {
             self.change_track(ui, 1);
@@ -257,7 +262,7 @@ impl App {
     }
 
     fn prev_song(&mut self, ui: &mut Ui) {
-        if self.shuffle {
+        if self.config.shuffle {
             self.randomize_track(ui);
         } else {
             self.change_track(ui, -1);
@@ -267,29 +272,45 @@ impl App {
 
     fn seek(&mut self, seek_point_ms: u64) {
         self.player_handle.tx.send(Command::Seek(Duration::from_millis(seek_point_ms))).unwrap();
+        self.save_config();
     }
 
     fn set_volume(&mut self, volume: f32) {
         self.player_handle.tx.send(Command::SetVolume(volume)).unwrap();
+        self.save_config();
+    }
+
+    fn save_config(&mut self) {
+        if !self.is_config_applied {
+            return;  // Config isn't fully applied so saving at this point will fuck up the config state
+        }
+        self.config.song_id = self.playing_idx;
+        self.config.volume = *self.player_handle.shared.volume.lock().unwrap();
+        self.config.progress_ms = self.player_handle.shared.position_ms.load(Ordering::Relaxed);
+        self.config.save();
+        self.last_saved = Instant::now();
+    }
+
+    fn is_playing(&self) -> bool {
+        self.player_handle.shared.playing.load(Ordering::Relaxed)
     }
 }
 
 impl Default for App {
     fn default() -> Self {
+        let config = Config::load_or_default();
+
         let s = Self {
             screen: AppScreen::Current,
-            songs: load_songs(if option_env!("FULL_SONG_LIST") == Some("1") {
-                "/home/tumpa/projects/sandbox/music_downloads/"
-            } else {
-                "songs"
-            }, false).unwrap(),
+            songs: vec![],
             selected_idx: None,
             playing_idx: None,
             cover_image: None,
             player_handle: spawn_player(),
             media_controls: start_souvlaki_thread(),
-            shuffle: false,
-            loop_: false
+            config,
+            is_config_applied: false,
+            last_saved: Instant::now(),
         };
 
         if s.media_controls.is_none() {
@@ -300,16 +321,47 @@ impl Default for App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        self.save_config();
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if !self.is_config_applied {
+            self.songs = load_songs(self.config.dir.to_str().unwrap(), true).unwrap_or(vec![]);
+
+            self.set_volume(self.config.volume);
+            self.set_track(ui, self.config.song_id);
+            self.seek(self.config.progress_ms);
+            self.play_selected();
+            self.pause();
+            self.is_config_applied = true;
+            self.save_config();
+        }
+
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             ui.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if ui.input(|i| i.key_pressed(Key::Space)) {
+            self.toggle_pause();
+        }
+        if ui.input(|i| i.key_pressed(Key::N)) {
+            self.next_song(ui);
+        }
+        if ui.input(|i| i.key_pressed(Key::B)) {
+            self.prev_song(ui);
+        }
+
+        if self.last_saved.elapsed().as_secs() > 5 && self.is_playing() {
+            self.save_config();
         }
 
         while let Ok(ev) = self.player_handle.events.recv_timeout(Duration::from_millis(10)) {
             match ev {
                 Event::Finished => {
-                    if self.loop_ {
+                    if self.config.loop_one {
                         self.play_selected();
                     } else {
                         self.next_song(ui);
