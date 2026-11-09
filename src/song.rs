@@ -1,8 +1,8 @@
-use std::{io, fs};
-use std::path::PathBuf;
 use chrono::{DateTime, Datelike, Timelike};
 use derivative::Derivative;
 use id3::{Tag, TagLike, Timestamp};
+use std::path::PathBuf;
+use std::{fs, io};
 
 // Maybe I should split into headless and "extended"? Idk, I think it's gonna be fine once it's gonna be pulled from DB
 #[derive(Derivative)]
@@ -16,7 +16,7 @@ pub struct Song {
     pub duration: Option<u32>,
     pub date: Option<Timestamp>,
     #[derivative(Debug = "ignore")]
-    pub album_art: Option<Vec<u8>>,  // <-- Just image data. Let's hope egui don't choke on it
+    pub album_art: Option<Vec<u8>>, // <-- Just image data. Let's hope egui don't choke on it
 }
 
 impl Song {
@@ -116,30 +116,24 @@ impl Song {
                     album_art,
                 })
             }
-            Err(e) => {
-                Some(Song {
-                    path,
-                    derived_name: filename,
-                    title: None,
-                    artists: None,
-                    album: None,
-                    duration: None,
-                    date: None,
-                    album_art: None,
-                })
-            }
+            Err(e) => Some(Song {
+                path,
+                derived_name: filename,
+                title: None,
+                artists: None,
+                album: None,
+                duration: None,
+                date: None,
+                album_art: None,
+            }),
         }
     }
 
     pub fn display(&self) -> String {
         match (&self.artists, &self.title) {
-            (Some(artists), Some(title)) => {
-                artists.join(", ") + " - " + &title
-            }
-            (None, Some(title)) => {title.to_string()}
-            (Some(_), None) | (None, None) => {
-                self.derived_name.clone()
-            }
+            (Some(artists), Some(title)) => artists.join(", ") + " - " + &title,
+            (None, Some(title)) => title.to_string(),
+            (Some(_), None) | (None, None) => self.derived_name.clone(),
         }
     }
 }
@@ -176,6 +170,8 @@ pub fn load_songs(path: &str, is_recursive: bool) -> io::Result<Vec<Song>> {
             }
         }
     }
+
+    files.sort_by_key(|x| x.display());
 
     Ok(files)
 }
