@@ -1,131 +1,75 @@
-use chrono::{DateTime, Datelike, Timelike};
-use derivative::Derivative;
-use id3::{Tag, TagLike, Timestamp};
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::probe::Probe;
+use lofty::tag::Accessor;
+use lofty::tag::items::Timestamp;
 use std::path::PathBuf;
 use std::{fs, io};
 
-// Maybe I should split into headless and "extended"? Idk, I think it's gonna be fine once it's gonna be pulled from DB
-#[derive(Derivative)]
-#[derivative(Debug)]
+#[derive(Debug)]
 pub struct Song {
     pub path: PathBuf,
     pub derived_name: String,
     pub title: Option<String>,
     pub artists: Option<Vec<String>>,
     pub album: Option<String>,
-    pub duration: Option<u32>,
+    pub duration: u32,
     pub date: Option<Timestamp>,
-    #[derivative(Debug = "ignore")]
-    pub album_art: Option<Vec<u8>>, // <-- Just image data. Let's hope egui don't choke on it
 }
 
 impl Song {
+    pub fn get_art(&self) -> Option<Vec<u8>> {
+        let tagged_file = Probe::open(self.path.clone()).ok()?.read().ok()?;
+        if let Some(tag) = tagged_file.primary_tag() {
+            tag.pictures().iter().next().map(|x| x.data().to_vec())
+        } else {
+            None
+        }
+    }
+
     pub fn from_path(path: PathBuf) -> Option<Song> {
         let filename = path.file_stem()?.to_str()?.to_string();
 
-        match Tag::read_from_path(&path) {
-            Ok(tag) => {
-                let title = if let Some(title) = tag.title() {
-                    Some(title.to_string())
-                } else {
-                    None
-                };
+        let tagged_file = Probe::open(path.clone()).ok()?.read().ok()?;
+        let properties = tagged_file.properties();
+        let duration = properties.duration().as_millis() as u32;
 
-                let artists = if let Some(title) = tag.artists() {
-                    Some(title.iter().map(|x| x.to_string()).collect())
-                } else {
-                    None
-                };
-
-                let album = if let Some(title) = tag.album() {
-                    Some(title.to_string())
-                } else {
-                    None
-                };
-
-                let duration = if let Some(duration) = tag.duration() {
-                    Some(duration)
-                } else {
-                    None
-                };
-
-                let date = if let Some(date) = tag.date_recorded() {
-                    Some(date)
-                } else if let Some(date) = tag.date_released() {
-                    Some(date)
-                } else if let Some(date) = tag.original_date_released() {
-                    Some(date)
-                } else {
-                    None
-                };
-
-                // Do some formatting
-                let date = if let Some(date) = date {
-                    if date.year < 10000 {
-                        // It's fine as is
-                        Some(date)
-                    } else if date.year < 100000000 {
-                        // yt-dlp formatting of YYYYMMDD
-                        let year = date.year / 10000;
-                        let month = (date.year % 10000) / 100;
-                        let day = date.year % 100;
-                        let timestamp = Timestamp {
-                            year,
-                            month: Some(month as u8),
-                            day: Some(day as u8),
-                            hour: None,
-                            minute: None,
-                            second: None,
-                        };
-
-                        Some(timestamp)
-                    } else {
-                        // Probably just a timestamp
-                        if let Some(dt) = DateTime::from_timestamp(date.year as i64, 0) {
-                            Some(Timestamp {
-                                year: dt.year(),
-                                month: Some(dt.month() as u8),
-                                day: Some(dt.day() as u8),
-                                hour: Some(dt.hour() as u8),
-                                minute: Some(dt.minute() as u8),
-                                second: Some(dt.second() as u8),
-                            })
-                        } else {
-                            // Nope, something fucked up royally, just pass the thing as is
-                            Some(date)
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let album_art = if let Some(picture) = tag.pictures().next() {
-                    Some(picture.data.clone())
-                } else {
-                    None
-                };
-
-                Some(Song {
-                    path,
-                    derived_name: filename,
-                    title,
-                    artists,
-                    album,
-                    duration,
-                    date,
-                    album_art,
-                })
+        if let Some(tag) = tagged_file.primary_tag() {
+            let title = tag.title().map(|x| x.to_string());
+            let album = tag.album().map(|x| x.to_string());
+            let mut artists = tag
+                .get_strings(lofty::tag::ItemKey::TrackArtists)
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>();
+            if artists.is_empty() {
+                // Let's check jic ItemKey::TrackArtist is there
+                if let Some(artist) = tag.get_string(lofty::tag::ItemKey::TrackArtist) {
+                    artists = vec![artist.to_string()];
+                }
             }
-            Err(e) => Some(Song {
+            let date = tag.date();
+            Some(Song {
+                path,
+                derived_name: filename,
+                title,
+                artists: if !artists.is_empty() {
+                    Some(artists)
+                } else {
+                    None
+                },
+                album,
+                duration,
+                date,
+            })
+        } else {
+            Some(Song {
                 path,
                 derived_name: filename,
                 title: None,
-                artists: None,
                 album: None,
-                duration: None,
+                artists: None,
+                duration,
                 date: None,
-                album_art: None,
-            }),
+            })
         }
     }
 
@@ -162,7 +106,8 @@ pub fn load_songs(path: &str, is_recursive: bool) -> io::Result<Vec<Song>> {
                     continue;
                 }
 
-                if !SUPPORTED_EXTENSIONS.contains(&extension.unwrap()) {
+                // &&* is crazy xDD
+                if !SUPPORTED_EXTENSIONS.contains(&&*extension.unwrap().to_lowercase()) {
                     continue;
                 }
 
@@ -171,7 +116,7 @@ pub fn load_songs(path: &str, is_recursive: bool) -> io::Result<Vec<Song>> {
         }
     }
 
-    files.sort_by_key(|x| x.display());
+    files.sort_by_cached_key(|x| x.display());
 
     Ok(files)
 }

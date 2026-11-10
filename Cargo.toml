@@ -8,8 +8,6 @@ eframe = "0.36.2"
 egui = "0.36.2"
 egui_alignments = "0.3.9"
 
-id3 = "1.17.2"
-derivative = "2.2.0"
 chrono = "0.4.45"
 image = "0.25.10"
 rodio = "0.23.0"
@@ -18,3 +16,4 @@ rand = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.0"
 directories = "6.0.0"
+lofty = "0.25.5"

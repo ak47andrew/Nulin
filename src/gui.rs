@@ -5,6 +5,7 @@ use crate::song::{Song, load_songs};
 use crate::widgets::*;
 use egui::*;
 use egui_alignments::*;
+use image::DynamicImage;
 use rand::random_range;
 use souvlaki::{MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition, SeekDirection};
 use std::process::exit;
@@ -26,11 +27,11 @@ pub struct App {
     selected_idx: Option<usize>,
     playing_idx: Option<usize>,
     cover_image: Option<TextureHandle>,
+    default_cover_image: DynamicImage,
     config: Config,
     is_config_applied: bool, // We don't have `ui` in Default so we have to apply it on our first frame
     last_saved: Instant,
     screen_changed: bool,
-    process_global_hotkeys: bool,
 }
 
 impl App {
@@ -54,13 +55,13 @@ impl App {
         // Here it's used straight away
         CentralPanel::default().show(ui, |ui| match self.screen {
             AppScreen::Current => self.draw_central_current(ui, _frame),
-            AppScreen::Songs => self.draw_cental_songs(ui, _frame),
+            AppScreen::Songs => self.draw_central_songs(ui, _frame),
             AppScreen::Search => self.draw_central_search(ui, _frame),
         });
 
         // So we can safely reset self.screen_changed at the start of the next frame
 
-        ui.request_repaint();
+        ui.request_repaint_after(Duration::from_millis(100));
     }
 
     fn draw_player(&mut self, ui: &mut Ui) {
@@ -86,7 +87,7 @@ impl App {
                 )
             })
             .inner
-            .drag_stopped()
+            .drag_started()
         {
             self.seek(p);
         }
@@ -111,13 +112,24 @@ impl App {
                 self.config.shuffle = !self.config.shuffle;
                 self.save_config();
             }
-            if circular_button(ui, 50.0, RichText::new("<").size(35.0)).clicked() {
+            if circular_button(ui, 50.0, RichText::new("⏮️").size(35.0)).clicked() {
                 self.prev_song(ui);
             }
-            if circular_button(ui, 50.0, RichText::new("II").size(35.0)).clicked() {
+            if circular_button(
+                ui,
+                50.0,
+                RichText::new(if self.is_playing() {
+                    "⏸️"
+                } else {
+                    "▶️"
+                })
+                .size(35.0),
+            )
+            .clicked()
+            {
                 self.toggle_pause();
             }
-            if circular_button(ui, 50.0, RichText::new(">").size(35.0)).clicked() {
+            if circular_button(ui, 50.0, RichText::new("⏭️").size(35.0)).clicked() {
                 self.next_song(ui);
             }
             if circular_button(
@@ -159,7 +171,7 @@ impl App {
                 )
             })
             .inner
-            .drag_stopped()
+            .changed()
         {
             self.set_volume(v);
         }
@@ -170,22 +182,15 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [ui.available_width(), 20.0],
-                Label::new(RichText::new("Labels").heading()),
+                Label::new(RichText::new("Sections").heading()),
             );
         });
         let prev = self.screen;
         sidebar_entry(ui, &mut self.screen, AppScreen::Current, "Player");
         sidebar_entry(ui, &mut self.screen, AppScreen::Songs, "Songs");
         sidebar_entry(ui, &mut self.screen, AppScreen::Search, "Search");
-        // println!(
-        //     "Prev: {:?}, now: {:?}, is_changed: {}",
-        //     prev,
-        //     self.screen,
-        //     self.screen != prev
-        // );
         if self.screen != prev {
             self.screen_changed = true;
-            self.process_global_hotkeys = true; // Failsafe in case we're leaving Search without unfocusing textbox
         }
     }
 
@@ -222,79 +227,65 @@ impl App {
         }
     }
 
-    fn draw_cental_songs(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn draw_central_songs(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if self.screen_changed {
             self.selected_idx = self.playing_idx;
         }
-        let mut new_ind = None;
-        let mut is_dc = false;
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for (ind, song) in self.songs.iter().enumerate() {
-                let resp = sized_entry(
-                    ui,
-                    40.0,
-                    Align2::LEFT_TOP,
-                    self.selected_idx == Some(ind),
-                    &song.derived_name,
-                );
-                if resp.clicked() {
-                    new_ind = Some(ind); // Just to make borrow checker shut the fuck up
-                }
-                if resp.double_clicked() {
-                    is_dc = true;
-                    self.screen = AppScreen::Current;
-                }
-                if self.screen_changed && Some(ind) == self.selected_idx {
-                    resp.scroll_to_me(Some(egui::Align::Center));
-                    // println!("Scrolled");
-                }
-            }
-        });
-        if let Some(ind) = new_ind {
-            self.selected_idx = Some(ind);
-        }
-        if is_dc {
-            self.playing_idx = new_ind;
-            self.set_track(ui, new_ind);
-            self.play_selected();
-        }
+        self.song_list(ui, |x| x.iter().enumerate().map(|x| x.0).collect());
     }
 
     fn draw_central_search(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        self.process_global_hotkeys = !ui
-            .add(
-                egui::TextEdit::singleline(&mut self.config.search_input)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::FontId::proportional(32.0)),
-            )
-            .has_focus();
+        ui.add(
+            egui::TextEdit::singleline(&mut self.config.search_input)
+                .desired_width(f32::INFINITY)
+                .font(egui::FontId::proportional(32.0)),
+        );
 
+        let s = self.config.search_input.to_lowercase();
+        self.song_list(ui, |x| {
+            x.iter()
+                .enumerate()
+                .filter(|(_, x)| x.display().to_lowercase().contains(&*s))
+                .map(|(x, _)| x)
+                .collect()
+        });
+    }
+
+    fn song_list(&mut self, ui: &mut Ui, f: impl FnOnce(&[Song]) -> Vec<usize>) {
+        let indexes = f(&self.songs);
+        // println!("{:?}", indexes);
         let mut new_ind = None;
         let mut is_dc = false;
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for (ind, song) in self
-                .songs
-                .iter()
-                .enumerate()
-                .filter(|(_, x)| x.display().contains(&self.config.search_input))
-            {
-                let resp = sized_entry(
-                    ui,
-                    40.0,
-                    Align2::LEFT_TOP,
-                    self.selected_idx == Some(ind),
-                    &song.derived_name,
-                );
-                if resp.clicked() {
-                    new_ind = Some(ind); // Just to make borrow checker shut the fuck up
+        ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            40.0,
+            indexes.len(),
+            |ui, row_range| {
+                for ind in row_range {
+                    // let song = &songs[ind];
+                    let ind = indexes[ind];
+                    let song = &self.songs[ind];
+                    let resp = sized_entry(
+                        ui,
+                        40.0,
+                        Align2::LEFT_TOP,
+                        self.selected_idx == Some(ind),
+                        &song.derived_name,
+                    );
+                    if resp.clicked() {
+                        new_ind = Some(ind); // Just to make borrow checker shut the fuck up
+                    }
+                    if resp.double_clicked() {
+                        is_dc = true;
+                        self.screen = AppScreen::Current;
+                    }
+                    if self.screen_changed && Some(ind) == self.selected_idx {
+                        resp.scroll_to_me(Some(egui::Align::Center));
+                        // println!("Scrolled");
+                    }
                 }
-                if resp.double_clicked() {
-                    is_dc = true;
-                    self.screen = AppScreen::Current;
-                }
-            }
-        });
-
+            },
+        );
         if let Some(ind) = new_ind {
             self.selected_idx = Some(ind);
         }
@@ -314,13 +305,15 @@ impl App {
         }
         let idx = self.playing_idx.unwrap();
         let song = &self.songs[idx];
-        let img = if let Some(art) = &song.album_art {
-            image::load_from_memory(art).unwrap()
+        let rgba = if let Some(art) = &song.get_art() {
+            match image::load_from_memory(art) {
+                Ok(s) => s.to_rgba8(),
+                Err(_) => self.default_cover_image.to_rgba8(),
+            }
         } else {
-            image::load_from_memory(include_bytes!("../assets/missing-draft.png")).unwrap()
+            self.default_cover_image.to_rgba8()
         };
 
-        let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
 
         let color_image =
@@ -449,7 +442,10 @@ impl Default for App {
             is_config_applied: false,
             last_saved: Instant::now(),
             screen_changed: true,
-            process_global_hotkeys: true,
+            default_cover_image: image::load_from_memory(include_bytes!(
+                "../assets/missing-draft.png"
+            ))
+            .unwrap(),
         };
 
         if s.media_controls.is_none() {
@@ -473,9 +469,9 @@ impl eframe::App for App {
 
             self.set_volume(self.config.volume);
             self.set_track(ui, self.config.song_id);
-            self.seek(self.config.progress_ms);
             self.play_selected();
             self.pause();
+            self.seek(self.config.progress_ms);
             self.is_config_applied = true;
             self.save_config();
 
@@ -488,7 +484,7 @@ impl eframe::App for App {
             self.screen = startup_screen;
         }
 
-        if self.process_global_hotkeys {
+        if !ui.ctx().egui_wants_keyboard_input() {
             if ui.input(|i| i.key_pressed(Key::Escape)) {
                 ui.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -507,11 +503,7 @@ impl eframe::App for App {
             self.save_config();
         }
 
-        while let Ok(ev) = self
-            .player_handle
-            .events
-            .recv_timeout(Duration::from_millis(10))
-        {
+        while let Ok(ev) = self.player_handle.events.try_recv() {
             match ev {
                 Event::Finished => {
                     if self.config.loop_one {
@@ -521,8 +513,10 @@ impl eframe::App for App {
                     }
                 }
                 Event::SongLoaded => {
-                    if let Some(controls) = &mut self.media_controls {
-                        let song = &self.songs[self.playing_idx.unwrap()];
+                    if let Some(controls) = &mut self.media_controls
+                        && let Some(playing_idx) = self.playing_idx
+                    {
+                        let song = &self.songs[playing_idx];
                         let s = MediaMetadata {
                             title: song.title.as_deref(),
                             album: song.album.as_deref(),
@@ -547,46 +541,42 @@ impl eframe::App for App {
 
         let mut events = vec![]; // Fighting borrow checker because... yikes
         if let Some(controls) = &mut self.media_controls {
-            while let Ok(ev) = controls.events.recv_timeout(Duration::from_millis(10)) {
+            while let Ok(ev) = controls.events.try_recv() {
                 events.push(ev);
             }
 
             let _ = controls
                 .media_controls
-                .set_volume(*self.player_handle.shared.volume.lock().unwrap() as f64)
-                .unwrap();
+                .set_volume(*self.player_handle.shared.volume.lock().unwrap() as f64);
 
-            let _ = controls
-                .media_controls
-                .set_playback(
-                    if !self
-                        .player_handle
-                        .shared
-                        .track_loaded
-                        .load(Ordering::Relaxed)
-                    {
-                        MediaPlayback::Stopped
-                    } else if !self.player_handle.shared.playing.load(Ordering::Relaxed) {
-                        MediaPlayback::Paused {
-                            progress: Some(MediaPosition(Duration::from_millis(
-                                self.player_handle
-                                    .shared
-                                    .position_ms
-                                    .load(Ordering::Relaxed),
-                            ))),
-                        }
-                    } else {
-                        MediaPlayback::Playing {
-                            progress: Some(MediaPosition(Duration::from_millis(
-                                self.player_handle
-                                    .shared
-                                    .position_ms
-                                    .load(Ordering::Relaxed),
-                            ))),
-                        }
-                    },
-                )
-                .unwrap();
+            let _ = controls.media_controls.set_playback(
+                if !self
+                    .player_handle
+                    .shared
+                    .track_loaded
+                    .load(Ordering::Relaxed)
+                {
+                    MediaPlayback::Stopped
+                } else if !self.player_handle.shared.playing.load(Ordering::Relaxed) {
+                    MediaPlayback::Paused {
+                        progress: Some(MediaPosition(Duration::from_millis(
+                            self.player_handle
+                                .shared
+                                .position_ms
+                                .load(Ordering::Relaxed),
+                        ))),
+                    }
+                } else {
+                    MediaPlayback::Playing {
+                        progress: Some(MediaPosition(Duration::from_millis(
+                            self.player_handle
+                                .shared
+                                .position_ms
+                                .load(Ordering::Relaxed),
+                        ))),
+                    }
+                },
+            );
         }
 
         for ev in events {
@@ -601,7 +591,9 @@ impl eframe::App for App {
                     self.play_selected()
                 }
                 MediaControlEvent::Seek(_) => {
-                    todo!()
+                    println!(
+                        "IT ACTUALLY HAPPENED! WE GOT MediaControlEvent::Seek LET'S GOOOO. What kind of loser even tried to call this LMAO?"
+                    )
                 } // Sounds like some kind of bs. I'll set as todo and figure it out later if needed
                 MediaControlEvent::SeekBy(sd, d) => {
                     // Gonna give this thing a d omegalul
@@ -635,8 +627,11 @@ impl eframe::App for App {
                 MediaControlEvent::OpenUri(_) => {}    // Not gonna happen
                 MediaControlEvent::Raise => ui.send_viewport_cmd(ViewportCommand::Focus),
                 MediaControlEvent::Quit => exit(0), // Uh... you sure this should be an option...? Fine ig...
-                _ => {
-                    unreachable!()
+                e => {
+                    println!(
+                        "oOoOh, a lib update? Yeah, no idea what to do with {:?} lol",
+                        e
+                    );
                 }
             }
         }

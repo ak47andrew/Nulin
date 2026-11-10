@@ -64,6 +64,6 @@ impl Config {
         let dirs = ProjectDirs::from("dev", "reborn", "nulin").unwrap();
         let config_dir = dirs.config_dir();
         create_dir_all(config_dir).unwrap();
-        config_dir.to_path_buf().with_file_name("nulin.toml")
+        config_dir.to_path_buf().join("nulin.toml")
     }
 }
