@@ -87,7 +87,7 @@ impl App {
                 )
             })
             .inner
-            .drag_started()
+            .drag_stopped()
         {
             self.seek(p);
         }
