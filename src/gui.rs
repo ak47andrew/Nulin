@@ -231,7 +231,7 @@ impl App {
         if self.screen_changed {
             self.selected_idx = self.playing_idx;
         }
-        self.song_list(ui, |x| x.iter().enumerate().map(|x| x.0).collect());
+        self.song_list(ui, "songs", |x| x.iter().enumerate().map(|x| x.0).collect());
     }
 
     fn draw_central_search(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -242,7 +242,7 @@ impl App {
         );
 
         let s = self.config.search_input.to_lowercase();
-        self.song_list(ui, |x| {
+        self.song_list(ui, "search", |x| {
             x.iter()
                 .enumerate()
                 .filter(|(_, x)| x.display().to_lowercase().contains(&*s))
@@ -251,41 +251,42 @@ impl App {
         });
     }
 
-    fn song_list(&mut self, ui: &mut Ui, f: impl FnOnce(&[Song]) -> Vec<usize>) {
+    fn song_list(&mut self, ui: &mut Ui, id: &'static str, f: impl FnOnce(&[Song]) -> Vec<usize>) {
         let indexes = f(&self.songs);
-        // println!("{:?}", indexes);
+        let row_h = 40.0;
         let mut new_ind = None;
         let mut is_dc = false;
-        ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            40.0,
-            indexes.len(),
-            |ui, row_range| {
-                for ind in row_range {
-                    // let song = &songs[ind];
-                    let ind = indexes[ind];
-                    let song = &self.songs[ind];
-                    let resp = sized_entry(
-                        ui,
-                        40.0,
-                        Align2::LEFT_TOP,
-                        self.selected_idx == Some(ind),
-                        &song.derived_name,
-                    );
-                    if resp.clicked() {
-                        new_ind = Some(ind); // Just to make borrow checker shut the fuck up
-                    }
-                    if resp.double_clicked() {
-                        is_dc = true;
-                        self.screen = AppScreen::Current;
-                    }
-                    if self.screen_changed && Some(ind) == self.selected_idx {
-                        resp.scroll_to_me(Some(egui::Align::Center));
-                        // println!("Scrolled");
-                    }
+
+        let mut area = ScrollArea::vertical().id_salt(id).auto_shrink(false);
+        if self.screen_changed {
+            if let Some(row) = indexes.iter().position(|&i| Some(i) == self.selected_idx) {
+                let step = row_h + ui.spacing().item_spacing.y; // show_rows uses row height + spacing
+                let target = row as f32 * step - ui.available_height() / 2.0 + row_h / 2.0;
+                area = area.vertical_scroll_offset(target.max(0.0));
+            }
+        }
+
+        area.show_rows(ui, row_h, indexes.len(), |ui, row_range| {
+            for ind in row_range {
+                // let song = &songs[ind];
+                let ind = indexes[ind];
+                let song = &self.songs[ind];
+                let resp = sized_entry(
+                    ui,
+                    40.0,
+                    Align2::LEFT_TOP,
+                    self.selected_idx == Some(ind),
+                    &song.derived_name,
+                );
+                if resp.clicked() {
+                    new_ind = Some(ind); // Just to make borrow checker shut the fuck up
                 }
-            },
-        );
+                if resp.double_clicked() {
+                    is_dc = true;
+                    self.screen = AppScreen::Current;
+                }
+            }
+        });
         if let Some(ind) = new_ind {
             self.selected_idx = Some(ind);
         }
@@ -474,14 +475,6 @@ impl eframe::App for App {
             self.seek(self.config.progress_ms);
             self.is_config_applied = true;
             self.save_config();
-
-            // Preload Songs list so scrolling is working fine
-            let startup_screen = self.screen;
-            self.screen = AppScreen::Songs;
-            self.draw(ui, _frame);
-            ui.ctx()
-                .request_discard("Initial Song screen draw so scroll is working");
-            self.screen = startup_screen;
         }
 
         if !ui.ctx().egui_wants_keyboard_input() {
