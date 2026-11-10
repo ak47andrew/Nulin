@@ -383,10 +383,18 @@ impl App {
     }
 
     fn prev_song(&mut self, ui: &mut Ui) {
-        if self.config.shuffle {
-            self.randomize_track(ui);
-        } else {
-            self.change_track(ui, -1);
+        if self
+            .player_handle
+            .shared
+            .position_ms
+            .load(Ordering::Relaxed)
+            < 1000
+        {
+            if self.config.shuffle {
+                self.randomize_track(ui);
+            } else {
+                self.change_track(ui, -1);
+            }
         }
         self.play_selected();
     }
