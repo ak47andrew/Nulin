@@ -1,13 +1,14 @@
-pub mod gui;
-pub mod widgets;
-pub mod song;
-pub mod playback;
-pub mod media_controls;
 pub mod config;
+pub mod db;
+pub mod gui;
+pub mod media_controls;
+pub mod playback;
+pub mod song;
+pub mod widgets;
 
-use std::time::Instant;
 use crate::gui::App;
 use crate::song::load_songs;
+use std::time::Instant;
 
 fn main() -> eframe::Result {
     if option_env!("PERFORMANCE_TEST") == Some("1") {
@@ -21,10 +22,6 @@ fn main() -> eframe::Result {
         Ok(())
     } else {
         let options = eframe::NativeOptions::default();
-        eframe::run_native(
-            "Nulin",
-            options,
-            Box::new(|_cc| Ok(Box::<App>::default())),
-        )
+        eframe::run_native("Nulin", options, Box::new(|_cc| Ok(Box::<App>::default())))
     }
 }

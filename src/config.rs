@@ -4,9 +4,10 @@ use std::fs;
 use std::fs::{create_dir_all, read_to_string};
 use std::path::PathBuf;
 
+// TODO: it's a save state, not a config... Once I'll factor out songs to a DB - rename to one
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct Config {
-    // TODO: it's a save state, not a config... Once I'll factor out songs to a DB - rename to one
     pub shuffle: bool,
     pub loop_one: bool,
 
@@ -61,9 +62,13 @@ impl Config {
     }
 
     fn get_path() -> PathBuf {
-        let dirs = ProjectDirs::from("dev", "reborn", "nulin").unwrap();
-        let config_dir = dirs.config_dir();
-        create_dir_all(config_dir).unwrap();
-        config_dir.to_path_buf().join("nulin.toml")
+        get_base_path().join("nulin.toml")
     }
+}
+
+pub fn get_base_path() -> PathBuf {
+    let dirs = ProjectDirs::from("dev", "reborn", "nulin").unwrap();
+    let config_dir = dirs.config_dir();
+    create_dir_all(config_dir).unwrap();
+    config_dir.to_path_buf()
 }

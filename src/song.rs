@@ -5,6 +5,8 @@ use lofty::tag::items::Timestamp;
 use std::path::PathBuf;
 use std::{fs, io};
 
+use crate::db::DBHandler;
+
 #[derive(Debug)]
 pub struct Song {
     pub path: PathBuf,
@@ -47,6 +49,7 @@ impl Song {
                 }
             }
             let date = tag.date();
+            // date.map(|x| x);
             Some(Song {
                 path,
                 derived_name: filename,
@@ -84,6 +87,9 @@ impl Song {
 
 const SUPPORTED_EXTENSIONS: [&str; 4] = ["mp3", "ogg", "wav", "flac"];
 pub fn load_songs(path: &str, is_recursive: bool) -> io::Result<Vec<Song>> {
+    // All DB stuff is fully for testing (probably... idk yet)
+    let db = DBHandler::new().unwrap();
+
     let mut files = vec![];
     let mut dirs = vec![PathBuf::from(path)];
 
@@ -111,7 +117,9 @@ pub fn load_songs(path: &str, is_recursive: bool) -> io::Result<Vec<Song>> {
                     continue;
                 }
 
-                files.push(Song::from_path(path).unwrap());
+                let song = Song::from_path(path).unwrap();
+                db.insert_song(&song).unwrap();
+                files.push(song);
             }
         }
     }
