@@ -4,25 +4,22 @@ use std::fs;
 use std::fs::{create_dir_all, read_to_string};
 use std::path::PathBuf;
 
-// TODO: it's a save state, not a config... Once I'll factor out songs to a DB - rename to one
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
-pub struct Config {
+pub struct SaveState {
     pub shuffle: bool,
     pub loop_one: bool,
 
     // Read and updated only after loading and before saving
     pub volume: f32,
-    pub dir: PathBuf,
     pub song_id: Option<usize>,
     pub progress_ms: u64,
     pub search_input: String,
 }
 
-impl Default for Config {
+impl Default for SaveState {
     fn default() -> Self {
-        Config {
-            dir: PathBuf::new(),
+        SaveState {
             shuffle: false,
             loop_one: false,
             volume: 0.5,
@@ -33,24 +30,26 @@ impl Default for Config {
     }
 }
 
-impl Config {
+impl SaveState {
     pub fn load_or_default() -> Self {
-        let path = Config::get_path();
+        let path = SaveState::get_path();
         let content = match read_to_string(path) {
             Ok(content) => content,
             Err(_) => {
                 println!("File not found, using default");
-                return Config::default();
+                return SaveState::default();
             }
         };
-        toml::from_str::<Config>(&content).unwrap_or_else(|_| {
+        toml::from_str::<SaveState>(&content).unwrap_or_else(|_| {
             println!("Failed to deserialize, using default");
-            Config::default()
+            let s = SaveState::default();
+            s.save();
+            s
         })
     }
 
     pub fn save(&self) {
-        let path = Config::get_path();
+        let path = SaveState::get_path();
         let toml_string = match toml::to_string_pretty(self) {
             Ok(toml_string) => toml_string,
             Err(_) => {
@@ -62,7 +61,7 @@ impl Config {
     }
 
     fn get_path() -> PathBuf {
-        get_base_path().join("nulin.toml")
+        get_base_path().join("savestate.toml")
     }
 }
 

@@ -73,4 +73,24 @@ impl DBHandler {
 
         Ok(())
     }
+
+    pub fn get_song(&self, id: usize) -> Option<Song> {
+        let s = self
+            .get_to_obj("SELECT * FROM songs WHERE song_id = ?", params![id as u32])
+            .ok()?;
+        s.into_iter().next()
+    }
+
+    pub fn get_songs(&self) -> Vec<Song> {
+        // TODO: return SongHeadless and make .extend() because fetching 100MB of data from 3k songs is crazy.
+        // And this one only used for a search and song listings
+        self.get_to_obj("SELECT * FROM songs", []).unwrap_or(vec![])
+    }
+
+    pub fn get_songs_len(&self) -> usize {
+        self.get("SELECT COUNT(*) FROM songs", [], |row| {
+            Ok(row.get::<_, u32>(0)?)
+        })
+        .unwrap_or(vec![0])[0] as usize
+    }
 }

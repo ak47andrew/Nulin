@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
@@ -5,7 +6,7 @@ use lofty::tag::items::Timestamp;
 use std::path::PathBuf;
 use std::{fs, io};
 
-use crate::db::DBHandler;
+use crate::db::{DBHandler, FromDBRow};
 
 #[derive(Debug)]
 pub struct Song {
@@ -16,6 +17,31 @@ pub struct Song {
     pub album: Option<String>,
     pub duration: u32,
     pub date: Option<Timestamp>,
+}
+
+impl FromDBRow for Song {
+    fn from_row(row: &rusqlite::Row) -> anyhow::Result<Self> {
+        let path = PathBuf::from(row.get::<_, String>(1)?);
+        let filename = path
+            .file_stem()
+            .ok_or(anyhow!("Failed to get file_stem"))?
+            .to_str()
+            .ok_or(anyhow!("Failed to covert to string"))?
+            .to_string();
+
+        Ok(Song {
+            path: path,
+            derived_name: filename,
+            title: row.get(2)?,
+            artists: row.get::<_, Option<String>>(3)?.map(|x| vec![x]),
+            album: row.get(4)?,
+            duration: row.get(5)?,
+            date: row
+                .get::<_, Option<String>>(6)?
+                .map(|x| x.parse())
+                .transpose()?,
+        })
+    }
 }
 
 impl Song {

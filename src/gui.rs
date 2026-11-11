@@ -1,7 +1,7 @@
-use crate::config::Config;
+use crate::config::SaveState;
+use crate::db::DBHandler;
 use crate::media_controls::{MediaController, start_souvlaki_thread};
 use crate::playback::{Command, Event, PlayerHandle, spawn_player};
-use crate::song::{Song, load_songs};
 use crate::widgets::*;
 use egui::*;
 use egui_alignments::*;
@@ -21,17 +21,19 @@ pub enum AppScreen {
 
 pub struct App {
     screen: AppScreen,
-    songs: Vec<Song>,
+    // This fucks up whole transition logic for me. Readd once transition is over as cache (so we're not fetching DB each frame)
+    // songs: Vec<Song>, // Only loaded when Search or Songs is active, otherwise empty
     player_handle: PlayerHandle,
     media_controls: Option<MediaController>,
     selected_idx: Option<usize>,
     playing_idx: Option<usize>,
     cover_image: Option<TextureHandle>,
     default_cover_image: DynamicImage,
-    config: Config,
+    config: SaveState,
     is_config_applied: bool, // We don't have `ui` in Default so we have to apply it on our first frame
     last_saved: Instant,
     screen_changed: bool,
+    conn: DBHandler,
 }
 
 impl App {
@@ -52,14 +54,21 @@ impl App {
                 self.draw_sidebar(ui);
             });
 
-        // Here it's used straight away
+        // TODO bring back once self.songs is a thing
+        // if self.screen_changed {
+        //     self.songs = match self.screen {
+        //         AppScreen::Current => vec![],
+
+        //         AppScreen::Songs | AppScreen::Search => self.conn.get_songs(),
+        //     }
+        // }
+
+        // Here it's used straight away, so we can safely reset self.screen_changed at the start of the next frame
         CentralPanel::default().show(ui, |ui| match self.screen {
             AppScreen::Current => self.draw_central_current(ui, _frame),
             AppScreen::Songs => self.draw_central_songs(ui, _frame),
             AppScreen::Search => self.draw_central_search(ui, _frame),
         });
-
-        // So we can safely reset self.screen_changed at the start of the next frame
 
         ui.request_repaint_after(Duration::from_millis(100));
     }
@@ -199,7 +208,13 @@ impl App {
         if let Some(texture_handle) = &self.cover_image
             && let Some(idx) = self.playing_idx
         {
-            let song = &self.songs[idx];
+            let song = match self.conn.get_song(idx) {
+                Some(s) => s,
+                None => {
+                    self.playing_idx = None;
+                    return;
+                } // Song wasn't found (for example if it was deleted away from db) so we reset
+            };
             let available_size = ui.available_size() / 1.5; // Returns an egui::Vec2 (width, height)
 
             // 2. Get the texture size as floats and its aspect ratio
@@ -231,7 +246,16 @@ impl App {
         if self.screen_changed {
             self.selected_idx = self.playing_idx;
         }
-        self.song_list(ui, "songs", |x| x.iter().enumerate().map(|x| x.0).collect());
+        self.song_list(
+            ui,
+            "songs",
+            self.conn
+                .get("SELECT song_id FROM songs", [], |x| Ok(x.get::<_, u32>(0)?))
+                .unwrap()
+                .into_iter()
+                .map(|x| x as usize)
+                .collect(),
+        );
     }
 
     fn draw_central_search(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -241,18 +265,42 @@ impl App {
                 .font(egui::FontId::proportional(32.0)),
         );
 
-        let s = self.config.search_input.to_lowercase();
-        self.song_list(ui, "search", |x| {
-            x.iter()
-                .enumerate()
-                .filter(|(_, x)| x.display().to_lowercase().contains(&*s))
-                .map(|(x, _)| x)
-                .collect()
-        });
+        self.song_list(ui, "search", self.search_songs());
     }
 
-    fn song_list(&mut self, ui: &mut Ui, id: &'static str, f: impl FnOnce(&[Song]) -> Vec<usize>) {
-        let indexes = f(&self.songs);
+    fn search_songs(&self) -> Vec<usize> {
+        // Make fuzzy bs stuff by mixing up AND/OR and returning them together so we can get like a rating
+        let params = self
+            .config
+            .search_input
+            .to_lowercase()
+            .split_whitespace()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>();
+        // println!("{:?}", params);
+        if params.is_empty() {
+            return vec![];
+        }
+        const SAMPLE: &'static str = "(IFNULL(title, '') || ' ' || IFNULL(artists, '') || ' ' || IFNULL(album, '')) LIKE '%' || ? || '%'";
+        let command = "SELECT song_id FROM songs WHERE ".to_string()
+            + SAMPLE
+            + (" AND ".to_string() + SAMPLE)
+                .repeat(params.len() - 1)
+                .as_str();
+
+        // println!("{}", command);
+        self.conn
+            .get(command.as_str(), rusqlite::params_from_iter(params), |x| {
+                Ok(x.get::<_, u32>(0)?)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|x| x as usize)
+            .collect()
+    }
+
+    fn song_list(&mut self, ui: &mut Ui, id: &'static str, indexes: Vec<usize>) {
+        // There has to be a better way lol
         let row_h = 40.0;
         let mut new_ind = None;
         let mut is_dc = false;
@@ -268,9 +316,11 @@ impl App {
 
         area.show_rows(ui, row_h, indexes.len(), |ui, row_range| {
             for ind in row_range {
-                // let song = &songs[ind];
                 let ind = indexes[ind];
-                let song = &self.songs[ind];
+                let song = match self.conn.get_song(ind) {
+                    Some(s) => s,
+                    None => continue,
+                };
                 let resp = sized_entry(
                     ui,
                     40.0,
@@ -292,6 +342,7 @@ impl App {
         }
         if is_dc {
             self.playing_idx = new_ind;
+            self.config.search_input = String::new();
             self.set_track(ui, new_ind);
             self.play_selected();
         }
@@ -305,7 +356,7 @@ impl App {
             return;
         }
         let idx = self.playing_idx.unwrap();
-        let song = &self.songs[idx];
+        let song = self.conn.get_song(idx).unwrap(); // This should never return None, tho I'm not sure
         let rgba = if let Some(art) = &song.get_art() {
             match image::load_from_memory(art) {
                 Ok(s) => s.to_rgba8(),
@@ -330,16 +381,16 @@ impl App {
             None => return, // Moving on None doesn't do shit, so we don't care in the slightest
         };
         if offset < 0 && idx as i32 + offset < 0 {
-            idx = (self.songs.len() as i32 + idx as i32 + offset) as usize;
+            idx = (self.conn.get_songs_len() as i32 + idx as i32 + offset) as usize;
         } else {
-            idx = (idx as i32 + offset) as usize % self.songs.len();
+            idx = (idx as i32 + offset) as usize % self.conn.get_songs_len();
         }
 
         self.set_track(ui, Some(idx));
     }
 
     fn randomize_track(&mut self, ui: &mut Ui) {
-        self.set_track(ui, Some(random_range(0..self.songs.len())));
+        self.set_track(ui, Some(random_range(0..self.conn.get_songs_len())));
     }
 
     fn toggle_pause(&self) {
@@ -363,7 +414,7 @@ impl App {
             Some(idx) => {
                 self.player_handle
                     .tx
-                    .send(Command::Play(self.songs[idx].path.clone()))
+                    .send(Command::Play(self.conn.get_song(idx).unwrap().path.clone()))
                     .unwrap();
             }
             None => {
@@ -437,11 +488,10 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        let config = Config::load_or_default();
+        let config = SaveState::load_or_default();
 
         let s = Self {
             screen: AppScreen::Current,
-            songs: vec![],
             selected_idx: None,
             playing_idx: None,
             cover_image: None,
@@ -455,6 +505,7 @@ impl Default for App {
                 "../assets/missing-draft.png"
             ))
             .unwrap(),
+            conn: DBHandler::new().unwrap(), // I feel like this is one of the most justified "unwrap even tho it actually might be Err" in the whole codebase LOL
         };
 
         if s.media_controls.is_none() {
@@ -474,8 +525,6 @@ impl Drop for App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if !self.is_config_applied {
-            self.songs = load_songs(self.config.dir.to_str().unwrap(), true).unwrap_or(vec![]);
-
             self.set_volume(self.config.volume);
             self.set_track(ui, self.config.song_id);
             self.play_selected();
@@ -517,7 +566,7 @@ impl eframe::App for App {
                     if let Some(controls) = &mut self.media_controls
                         && let Some(playing_idx) = self.playing_idx
                     {
-                        let song = &self.songs[playing_idx];
+                        let song = self.conn.get_song(playing_idx).unwrap(); // There's a tiny possibility that entry can get deleted between loading the song and it actually getting loaded, but... I'm fine ty 
                         let s = MediaMetadata {
                             title: song.title.as_deref(),
                             album: song.album.as_deref(),
