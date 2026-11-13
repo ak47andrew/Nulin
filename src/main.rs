@@ -7,7 +7,7 @@ pub mod song;
 pub mod widgets;
 
 use crate::gui::App;
-use crate::song::load_songs;
+use crate::song::{Song, load_songs};
 use std::time::Instant;
 
 fn main() -> eframe::Result {

@@ -1,4 +1,6 @@
 use anyhow::{Result, bail};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Timelike};
+use lofty::tag::items::Timestamp;
 use rusqlite::{Connection, Error as SqliteError, Params, Row, params};
 
 use crate::{config::get_base_path, song::Song};
@@ -68,7 +70,12 @@ impl DBHandler {
              song.artists.clone().map(|x| x.join(", ")),
              song.album,
              song.duration,
-             song.date.map(|x| x.to_string()) // This is basically working bc .to_string is ISO-8601. It's a hack, but well fuck
+             // song.date.map(|x| x.to_string()) // This is basically working bc .to_string is ISO-8601. It's a hack, but well fuck
+             // Upd: well, guess what... it's not! This piece of ass, even tho documented to save to ISO-8601, doesn't do that.
+             // Yandex Music downloads only returned with a year so it was saved as "2024" and breaks fucking everything on load.
+             // As GTA 5 devs said: "Stupid fuck"
+             // I'm just gonna save/load timestamps and get `chrono` back into place
+            song.date.map(|x| save_lofty_timestamp(&x))
          ])?;
 
         Ok(())
@@ -92,5 +99,39 @@ impl DBHandler {
             Ok(row.get::<_, u32>(0)?)
         })
         .unwrap_or(vec![0])[0] as usize
+    }
+}
+
+pub fn save_lofty_timestamp(timestamp: &Timestamp) -> i64 {
+    let year = timestamp.year as i32;
+    let month = timestamp.month.unwrap_or(1) as u32;
+    let day = timestamp.day.unwrap_or(1) as u32;
+    let hour = timestamp.hour.unwrap_or(0) as u32;
+    let minute = timestamp.minute.unwrap_or(0) as u32;
+    let second = timestamp.second.unwrap_or(0) as u32;
+
+    let actually_usefull_timestamp_thank_you_chrono = NaiveDate::from_ymd_opt(year, month, day)
+        .unwrap()
+        .and_hms_opt(hour, minute, second)
+        .unwrap()
+        .and_utc();
+
+    actually_usefull_timestamp_thank_you_chrono.timestamp()
+}
+
+pub fn load_lofty_timestamp(secs: Option<i64>) -> Option<Timestamp> {
+    match secs {
+        None => None,
+        Some(seconds) => {
+            let dt = DateTime::from_timestamp_secs(seconds)?;
+            Some(Timestamp {
+                year: dt.year() as u16,
+                month: Some(dt.month() as u8),
+                day: Some(dt.day() as u8),
+                hour: Some(dt.hour() as u8),
+                minute: Some(dt.minute() as u8),
+                second: Some(dt.second() as u8),
+            })
+        }
     }
 }

@@ -6,7 +6,7 @@ use lofty::tag::items::Timestamp;
 use std::path::PathBuf;
 use std::{fs, io};
 
-use crate::db::{DBHandler, FromDBRow};
+use crate::db::{DBHandler, FromDBRow, load_lofty_timestamp};
 
 #[derive(Debug)]
 pub struct Song {
@@ -36,10 +36,7 @@ impl FromDBRow for Song {
             artists: row.get::<_, Option<String>>(3)?.map(|x| vec![x]),
             album: row.get(4)?,
             duration: row.get(5)?,
-            date: row
-                .get::<_, Option<String>>(6)?
-                .map(|x| x.parse())
-                .transpose()?,
+            date: load_lofty_timestamp(row.get(6)?),
         })
     }
 }
@@ -75,6 +72,7 @@ impl Song {
                 }
             }
             let date = tag.date();
+            println!("{:?}", date);
             // date.map(|x| x);
             Some(Song {
                 path,
